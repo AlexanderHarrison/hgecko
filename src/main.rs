@@ -212,6 +212,9 @@ fn start_compiling(args: &Args, asm: &[PathBuf]) -> Vec<AssembleJob> {
     let mut jobs = Vec::with_capacity(asm.len());
     let mut err = false;
     
+    // let mut script = String::new();
+    // script.push_str("#!/usr/bin/env bash\n");
+    
     for path in asm {
         let mut out_path = args.temp_path.to_path_buf();
         let mut hash = hash_bytes(path.as_os_str().as_encoded_bytes());
@@ -222,6 +225,9 @@ fn start_compiling(args: &Args, asm: &[PathBuf]) -> Vec<AssembleJob> {
             hash >>= 4;
         }
         out_path.push(unsafe { str::from_utf8_unchecked(&b) });
+        
+        // use std::fmt::Write;
+        // let _ = write!(&mut script, "'{}' --warn -mregnames -mgekko -mbig -a32 -I '{}' -o '{}' '{}' &\n", args.as_path.display(), path.parent().unwrap().display(), out_path.display(), path.display());
         
         let spawn = Command::new(&args.as_path)
             .arg("--warn")
@@ -244,6 +250,9 @@ fn start_compiling(args: &Args, asm: &[PathBuf]) -> Vec<AssembleJob> {
             },
         };
     }
+    
+    // script.push_str("wait\n");
+    // write(args.temp_path.join("script.sh"), script.as_bytes()).unwrap();
     
     if err { exit(1); }
     jobs
