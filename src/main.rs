@@ -51,7 +51,7 @@ and ensure the DEVKITPPC environment variable is set.");
         exit(1);
     }
     
-    if !args.asm_path.try_exists().is_ok_and(|e| e) {
+    if !args.as_path.try_exists().is_ok_and(|e| e) {
         eprintln!("{ERROR_STR} GNU assembler path '{}' does not exist!", args.as_path.display());
         exit(1);
     }
@@ -86,12 +86,24 @@ struct Code {
 }
 
 fn process_asm(args: &Args, paths: &[PathBuf]) -> Vec<Code> {
-    let mut err = false;
-    let mut codes = Vec::with_capacity(paths.len());
+    // processes ~2 files per ms, bottleneck is spawning the child processes.
     
-    let mut buf = [0u8; 512];
-    
+    // start all compilation jobs
     let mut jobs = start_compiling(args, paths);
+    
+    // while we wait for them to finish, read through the headers of all asm files for the injection address
+    let mut codes = collect_headers(paths);
+    
+    // get the compiled asm from the compiled elfs and merge into codes.
+    finish_compiling(&mut codes, &mut jobs, paths);
+    
+    codes
+}
+
+fn collect_headers(paths: &[PathBuf]) -> Vec<Code> {
+    let mut codes = Vec::with_capacity(paths.len());
+    let mut err = false;
+    let mut buf = [0u8; 512];
     
     'file: for asm_path in paths.iter() {
         let mut f = match File::open(asm_path) {
@@ -175,12 +187,10 @@ fn process_asm(args: &Args, paths: &[PathBuf]) -> Vec<Code> {
         })
     }
     
-    finish_compiling(&mut codes, &mut jobs, paths);
-    
     if err { exit(1); }
+    
     codes
 }
-
 
 fn hash_bytes(b: &[u8]) -> u32 {
     let mut h: u32 = 1234;
@@ -214,6 +224,7 @@ fn start_compiling(args: &Args, asm: &[PathBuf]) -> Vec<AssembleJob> {
         out_path.push(unsafe { str::from_utf8_unchecked(&b) });
         
         let spawn = Command::new(&args.as_path)
+            .arg("--warn")
             .arg("-mregnames")
             .arg("-mgekko")
             .arg("-mbig")
@@ -243,6 +254,7 @@ fn finish_compiling(
     jobs: &mut [AssembleJob],
     paths: &[PathBuf],
 ) {
+    let mut undef = Vec::new();
     let mut err = false;
     'file: for i in 0..codes.len() {
         if !jobs[i].child.wait().unwrap().success() {
@@ -268,6 +280,43 @@ fn finish_compiling(
                 continue 'file;
             }
         };
+        
+        // check for undefined symbols
+        let (symbol_table, string_table) = match elf.symbol_table() {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                eprintln!("{ERROR_STR} Failed to extract string table and symbol table sections in compiled elf for '{}'", path.display());
+                err = true;
+                continue 'file;
+            }
+            Err(e) => {
+                eprintln!("{ERROR_STR} Failed to parse compiled elf for '{}': {}", path.display(), e);
+                err = true;
+                continue 'file;
+            }
+        };
+        undef.clear();
+        let mut symbol_iter = symbol_table.iter();
+        symbol_iter.next(); // skip null entry
+        for s in symbol_iter {
+            if s.is_undefined() {
+                undef.push(s);
+            }
+        }
+        if !undef.is_empty() {
+            undef.sort_by_key(|u| u.st_name);
+            undef.dedup();
+            for u in undef.iter() {
+                let name = match string_table.get(u.st_name as usize) {
+                    Ok("") | Err(_) => "(unnamed symbol)",
+                    Ok(name) => name,
+                };
+                eprintln!("{WARNING_STR} Undefined symbol: {name}");
+            }
+            eprintln!("{WARNING_STR} {} undefined symbols in '{}'", undef.len(), path.display());
+        }
+        
+        // Extract code
         let text_header = match elf.section_header_by_name(".text") {
             Ok(Some(f)) => *f,
             Ok(None) => {
@@ -294,7 +343,6 @@ fn finish_compiling(
                 continue 'file;
             }
         };
-        
         if text.is_empty() {
             eprintln!("{WARNING_STR} File '{}' has no ASM! Skipping...", path.display());
         }
