@@ -187,41 +187,55 @@ struct AssembleJob {
 fn start_compiling(args: &Args, asm: &[PathBuf]) -> Vec<AssembleJob> {
     let mut jobs = Vec::with_capacity(asm.len());
     let mut err = false;
-    
-    for path in asm {
-        let mut out_path = args.temp_path.to_path_buf();
-        let mut hash = hash_bytes(path.as_os_str().as_encoded_bytes());
-        let mut b = [0u8; 8];
-        for i in 0..8 {
-            let n = (hash & 0xf) as u8;
-            b[i] = b'a' + n as u8;
-            hash >>= 4;
-        }
-        out_path.push(unsafe { str::from_utf8_unchecked(&b) });
 
-        let t = Instant::now();
-        let spawn = Command::new(&args.as_path)
-            .arg("--warn")
-            .arg("-mregnames")
-            .arg("-mgekko")
-            .arg("-mbig")
-            .arg("-a32")
-            .arg("-I")
-            .arg(path.parent().unwrap())
-            .arg("-o")
-            .arg(&out_path)
-            .arg(path)
-            .spawn();
-        println!("spawn in {}us", t.elapsed().as_micros());
-        
-        match spawn {
-            Ok(child) => jobs.push(AssembleJob { child, out_path }),
-            Err(e) => {
-                eprintln!("{ERROR_STR} Could not spawn compile process for '{}': {}", path.display(), e);
-                err = true;
-            },
-        };
-    }
+    std::thread::scope(|s| {
+        let mut spawns = Vec::with_capacity(asm.len());
+
+        let t = std::time::Instant::now();
+        for path in asm {
+            let mut out_path = args.temp_path.to_path_buf();
+            let mut hash = hash_bytes(path.as_os_str().as_encoded_bytes());
+            let mut b = [0u8; 8];
+            for i in 0..8 {
+                let n = (hash & 0xf) as u8;
+                b[i] = b'a' + n as u8;
+                hash >>= 4;
+            }
+            out_path.push(unsafe { str::from_utf8_unchecked(&b) });
+
+            let child_out_path = out_path.clone();
+            let spawn = s.spawn(move ||
+                Command::new(&args.as_path)
+                    .arg("--warn")
+                    .arg("-mregnames")
+                    .arg("-mgekko")
+                    .arg("-mbig")
+                    .arg("-a32")
+                    .arg("-I")
+                    .arg(path.parent().unwrap())
+                    .arg("-o")
+                    .arg(&child_out_path)
+                    .arg(path)
+                    .spawn()
+            );
+
+            spawns.push((spawn, path, out_path));
+        }
+        println!("spawn in {}ms", t.elapsed().as_millis());
+
+        let t = std::time::Instant::now();
+        for (spawn, path, out_path) in spawns {
+            let spawn = spawn.join().unwrap();
+            match spawn {
+                Ok(child) => jobs.push(AssembleJob { child, out_path }),
+                Err(e) => {
+                    eprintln!("{ERROR_STR} Could not spawn compile process for '{}': {}", path.display(), e);
+                    err = true;
+                },
+            };
+        }
+        println!("join in {}ms", t.elapsed().as_millis());
+    });
     
     if err { exit(1); }
     jobs
