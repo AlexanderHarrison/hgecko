@@ -2,7 +2,7 @@ use std::path::*;
 use std::process::*;
 use std::time::*;
 use std::fs::*;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 
 struct Args {
     pub asm_path: PathBuf,
@@ -34,7 +34,10 @@ and ensure the DEVKITPPC environment variable is set.");
             exit(1);
         }
     };
-    let as_path = Path::new(&devkitppc).join(Path::new("bin/powerpc-eabi-as"));
+    let mut as_path = Path::new(&devkitppc).to_path_buf();
+    as_path.push("bin");
+    as_path.push("powerpc-eabi-as");
+    as_path.set_extension(std::env::consts::EXE_EXTENSION);
     
     let asm_path = Path::new(&args[1]).into();
     let out_path = Path::new(&args[2]).into();
@@ -154,33 +157,6 @@ fn collect_headers(paths: &[PathBuf]) -> Vec<Code> {
             }
         };
         
-        // ensure newline terminated
-        // I hate that this is necessary
-        {
-            match f.seek(SeekFrom::End(-1)) {
-                Ok(_) => {},
-                Err(e) => {
-                    eprintln!("{ERROR_STR} Failed to seek in '{}': {e}.", asm_path.display());
-                    err = true;
-                    continue 'file;
-                }
-            }
-            let mut b = [0u8; 1];
-            match f.read_exact(&mut b) {
-                Ok(()) => {},
-                Err(e) => {
-                    eprintln!("{ERROR_STR} Failed to read '{}': {e}", asm_path.display());
-                    err = true;
-                    continue 'file;
-                }
-            }
-            if b[0] != b'\n' {
-                eprintln!("{ERROR_STR} ASM file '{}' is not newline terminated. ASM files MUST be newline terminated or they may be compiled incorrectly.", asm_path.display());
-                err = true;
-                continue 'file;
-            }
-        }
-        
         codes.push(Code {
             addr,
             code: Vec::new(),
@@ -222,7 +198,8 @@ fn start_compiling(args: &Args, asm: &[PathBuf]) -> Vec<AssembleJob> {
             hash >>= 4;
         }
         out_path.push(unsafe { str::from_utf8_unchecked(&b) });
-        
+
+        let t = Instant::now();
         let spawn = Command::new(&args.as_path)
             .arg("--warn")
             .arg("-mregnames")
@@ -235,6 +212,7 @@ fn start_compiling(args: &Args, asm: &[PathBuf]) -> Vec<AssembleJob> {
             .arg(&out_path)
             .arg(path)
             .spawn();
+        println!("spawn in {}us", t.elapsed().as_micros());
         
         match spawn {
             Ok(child) => jobs.push(AssembleJob { child, out_path }),
