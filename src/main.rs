@@ -5,6 +5,7 @@ use std::fs::*;
 use std::io::Read;
 
 struct Args {
+    pub quiet: bool,
     pub asm_path: PathBuf,
     pub out_path: PathBuf,
     pub temp_path: PathBuf,
@@ -12,7 +13,9 @@ struct Args {
 }
 
 const USAGE: &'static str = "USAGE:
-    hgecko <path/to/asm/folder> <path/to/output/codes.gct>
+    hgecko [flags] <path/to/asm/folder> <path/to/output/codes.gct>
+FLAGS:
+    -q, --quiet     Don't print to stdout.
 ";
 
 const ERROR_STR: &'static str = "\x1B[31mERROR:\x1B[0m";
@@ -20,7 +23,7 @@ const WARNING_STR: &'static str = "\x1B[33mWARNING:\x1B[0m";
 
 fn parse_args() -> Args {
     let args = std::env::args().collect::<Vec<_>>();
-    if args.len() != 3 {
+    if args.len() < 3 {
         print!("{}", USAGE);
         exit(1);
     }
@@ -39,27 +42,32 @@ and ensure the DEVKITPPC environment variable is set.");
     as_path.push("powerpc-eabi-as");
     as_path.set_extension(std::env::consts::EXE_EXTENSION);
     
-    let asm_path = Path::new(&args[1]).into();
-    let out_path = Path::new(&args[2]).into();
-    
-    let args = Args {
-        asm_path,
-        out_path,
+    let mut parsed_args = Args {
+        quiet: false,
+        asm_path: Path::new(&args[args.len() - 2]).into(),
+        out_path: Path::new(&args[args.len() - 1]).into(),
         temp_path: std::env::temp_dir(),
         as_path,
     };
     
-    if !args.asm_path.try_exists().is_ok_and(|e| e) {
-        eprintln!("{ERROR_STR} ASM path '{}' does not exist", args.asm_path.display());
+    for arg in args[1..args.len()-2].iter() {
+        match arg.as_ref() {
+            "-q" | "--quiet" => parsed_args.quiet = true,
+            _ => eprintln!("{WARNING_STR} Unknown argument '{}'", arg),
+        }
+    }
+    
+    if !parsed_args.asm_path.try_exists().is_ok_and(|e| e) {
+        eprintln!("{ERROR_STR} ASM path '{}' does not exist", parsed_args.asm_path.display());
         exit(1);
     }
     
-    if !args.as_path.try_exists().is_ok_and(|e| e) {
-        eprintln!("{ERROR_STR} GNU assembler path '{}' does not exist!", args.as_path.display());
+    if !parsed_args.as_path.try_exists().is_ok_and(|e| e) {
+        eprintln!("{ERROR_STR} GNU assembler path '{}' does not exist!", parsed_args.as_path.display());
         exit(1);
     }
     
-    args
+    parsed_args
 }
 
 fn collect_asm(asm_paths: &mut Vec<PathBuf>, path: &Path) {
@@ -384,5 +392,8 @@ fn main() {
     let mut codes = process_asm(&args, &asm_paths);
     codes.sort_by_key(|c| c.addr);
     write_codes(&args, &codes);
-    println!("processed {} files in {}ms", asm_paths.len(), t.elapsed().as_millis());
+    
+    if !args.quiet {
+        println!("processed {} files in {}ms", asm_paths.len(), t.elapsed().as_millis());
+    }
 }
