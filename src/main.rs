@@ -148,7 +148,12 @@ fn process_bin(_args: &Args, paths: &[PathBuf]) -> Vec<Code> {
                     err = true;
                     break;
                 }
-                let code = &code_bytes[..code_size];
+                let mut code = &code_bytes[..code_size];
+                
+                // trim null terminator
+                if code.len() > 4 && code.ends_with(&[0, 0, 0, 0]) {
+                    code = &code[..code.len() - 4]
+                }
                 
                 codes.push(Code {
                     addr: addr + 0x80000000,
