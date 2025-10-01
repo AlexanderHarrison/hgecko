@@ -70,7 +70,11 @@ and ensure the DEVKITPPC environment variable is set.");
     parsed_args
 }
 
-fn collect_asm(asm_paths: &mut Vec<PathBuf>, path: &Path) {
+fn collect_asm(
+    asm_paths: &mut Vec<PathBuf>,
+    bin_paths: &mut Vec<PathBuf>,
+    path: &Path
+) {
     let iter = match path.read_dir() {
         Ok(i) => i,
         Err(e) => {
@@ -84,8 +88,15 @@ fn collect_asm(asm_paths: &mut Vec<PathBuf>, path: &Path) {
         let path = entry.path();
         
         match entry.file_type() {
-            Ok(f) if f.is_dir() => collect_asm(asm_paths, &path),
-            Ok(f) if f.is_file() && path.extension() == Some("asm".as_ref()) => asm_paths.push(path),
+            Ok(f) if f.is_dir() => collect_asm(asm_paths, bin_paths, &path),
+            Ok(f) if f.is_file() => {
+                let ext = path.extension();
+                if ext == Some("asm".as_ref()) {
+                    asm_paths.push(path);
+                } else if ext == Some("bin".as_ref()) {
+                    bin_paths.push(path);
+                }
+            }
             _ => {},
         }
     }
@@ -94,6 +105,82 @@ fn collect_asm(asm_paths: &mut Vec<PathBuf>, path: &Path) {
 struct Code {
     pub addr: u32,
     pub code: Vec<u8>,
+}
+
+fn process_bin(_args: &Args, paths: &[PathBuf]) -> Vec<Code> {
+    // There shouldn't be too many of these so we just do this on the main thread.
+
+    let mut err = false;
+    let mut codes = Vec::new();
+
+    for bin_path in paths {
+        let bin = match std::fs::read(bin_path) {
+            Err(e) => {
+                eprintln!("{ERROR_STR} Failed to open '{}': {}", bin_path.display(), e);
+                err = true;
+                continue;
+            }
+            Ok(bin) => bin,
+        };
+        
+        let mut i = 0;
+        while i < bin.len() {
+            let next_code = &bin[i..];
+            if next_code.len() < 4 {
+                eprintln!("{ERROR_STR} Malformed bin file '{}': EOF in code header at offset 0x{:x}", bin_path.display(), i);
+                err = true;
+                break;
+            }
+            let type_and_addr = u32::from_be_bytes(next_code[0..4].try_into().unwrap());
+            let typ = (type_and_addr >> 25) << 1;
+            let addr = type_and_addr & 0x01FFFFFF;
+            
+            if typ == 0xC2 {
+                if next_code.len() < 8 {
+                    eprintln!("{ERROR_STR} Malformed bin file '{}': EOF in C2 code size at offset 0x{:x}", bin_path.display(), i);
+                    err = true;
+                    break;
+                }
+                let code_size = u32::from_be_bytes(next_code[4..8].try_into().unwrap()) as usize * 8;
+                let code_bytes = &next_code[8..];
+                if code_bytes.len() < code_size {
+                    eprintln!("{ERROR_STR} Malformed bin file '{}': EOF in C2 code at offset 0x{:x}", bin_path.display(), i);
+                    err = true;
+                    break;
+                }
+                let code = &code_bytes[..code_size];
+                
+                codes.push(Code {
+                    addr: addr + 0x80000000,
+                    code: code.to_vec(),
+                });
+                
+                i += 8 + code_size;
+            } else if typ == 0x04 {
+                if next_code.len() < 8 {
+                    eprintln!("{ERROR_STR} Malformed bin file '{}': EOF in 04 code at offset 0x{:x}", bin_path.display(), i);
+                    err = true;
+                    break;
+                }
+                let asm = &next_code[4..8];
+                
+                codes.push(Code {
+                    addr: addr + 0x80000000,
+                    code: asm.to_vec(),
+                });
+
+                i += 8;
+            } else {
+                eprintln!("{ERROR_STR} Unsupported gecko code type in bin file '{}': type {:x} offset 0x{:x}", bin_path.display(), typ, i);
+                err = true;
+                break;
+            }
+        }
+    }
+    
+    if err { exit(1); }
+
+    codes
 }
 
 fn process_asm(args: &Args, paths: &[PathBuf]) -> Vec<Code> {
@@ -388,8 +475,11 @@ fn main() {
     let t = Instant::now();
     let args = parse_args();
     let mut asm_paths = Vec::new();
-    collect_asm(&mut asm_paths, &args.asm_path);
+    let mut bin_paths = Vec::new();
+    collect_asm(&mut asm_paths, &mut bin_paths, &args.asm_path);
     let mut codes = process_asm(&args, &asm_paths);
+    codes.extend(process_bin(&args, &bin_paths));
+
     codes.sort_by_key(|c| c.addr);
     write_codes(&args, &codes);
     
