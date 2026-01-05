@@ -358,39 +358,36 @@ fn finish_compiling(
         };
         
         // check for undefined symbols
-        let (symbol_table, string_table) = match elf.symbol_table() {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                eprintln!("{ERROR_STR} Failed to extract string table and symbol table sections in compiled elf for '{}'", path.display());
-                err = true;
-                continue 'file;
-            }
+        undef.clear();
+        match elf.symbol_table() {
+            Ok(None) => {},
+            Ok(Some((symbol_table, string_table))) => {
+                let mut symbol_iter = symbol_table.iter();
+                symbol_iter.next(); // skip null entry
+                for s in symbol_iter {
+                    if s.is_undefined() {
+                        undef.push(s);
+                    }
+                }
+                if !undef.is_empty() {
+                    undef.sort_by_key(|u| u.st_name);
+                    undef.dedup();
+                    for u in undef.iter() {
+                        let name = match string_table.get(u.st_name as usize) {
+                            Ok("") | Err(_) => "(unnamed symbol)",
+                            Ok(name) => name,
+                        };
+                        eprintln!("{WARNING_STR} Undefined symbol: {name}");
+                    }
+                    eprintln!("{WARNING_STR} {} undefined symbols in '{}'", undef.len(), path.display());
+                }
+            },
             Err(e) => {
                 eprintln!("{ERROR_STR} Failed to parse compiled elf for '{}': {}", path.display(), e);
                 err = true;
                 continue 'file;
             }
         };
-        undef.clear();
-        let mut symbol_iter = symbol_table.iter();
-        symbol_iter.next(); // skip null entry
-        for s in symbol_iter {
-            if s.is_undefined() {
-                undef.push(s);
-            }
-        }
-        if !undef.is_empty() {
-            undef.sort_by_key(|u| u.st_name);
-            undef.dedup();
-            for u in undef.iter() {
-                let name = match string_table.get(u.st_name as usize) {
-                    Ok("") | Err(_) => "(unnamed symbol)",
-                    Ok(name) => name,
-                };
-                eprintln!("{WARNING_STR} Undefined symbol: {name}");
-            }
-            eprintln!("{WARNING_STR} {} undefined symbols in '{}'", undef.len(), path.display());
-        }
         
         // Extract code
         let text_header = match elf.section_header_by_name(".text") {
